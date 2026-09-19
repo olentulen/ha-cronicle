@@ -115,7 +115,7 @@ class CronicleClient:
     async def fetch_all(self) -> CronicleData:
         """Fetch the Cronicle state used by entities."""
         results = await asyncio.gather(
-            self._get("get_master_state"),
+            self._get("get_manager_state"),
             self._get("get_active_jobs"),
             self._post("get_schedule", {"offset": 0, "limit": 1000}),
             self._post("get_history", {"offset": 0, "limit": self._history_limit}),
@@ -126,8 +126,8 @@ class CronicleClient:
 
         if isinstance(results[0], dict):
             data.scheduler_enabled = bool(results[0].get("state", {}).get("enabled", 0))
-        elif "Unsupported API" not in str(results[0]):
-            _append_error(data, "get_master_state", results[0])
+        else:
+            _append_error(data, "get_manager_state", results[0])
 
         if isinstance(results[1], dict):
             jobs_raw = results[1].get("jobs", {}) or {}
@@ -154,12 +154,7 @@ class CronicleClient:
 
     async def test_connection(self) -> None:
         """Validate API connectivity."""
-        try:
-            await self._get("get_master_state")
-        except CronicleAPIError as err:
-            if "Unsupported API" not in str(err):
-                raise
-            await self._post("get_schedule", {"offset": 0, "limit": 1})
+        await self._get("get_manager_state")
 
     async def run_event(self, event_id: str | None = None, title: str | None = None) -> dict:
         """Run an event immediately by ID or exact title."""
@@ -178,7 +173,10 @@ class CronicleClient:
 
     async def set_scheduler_enabled(self, enabled: bool) -> dict:
         """Enable or disable the Cronicle scheduler."""
-        return await self._post("update_master_state", {"enabled": 1 if enabled else 0})
+        return await self._post(
+            "update_manager_state",
+            {"enabled": 1 if enabled else 0},
+        )
 
     async def get_job_status(self, job_id: str) -> dict:
         """Fetch status for one job."""
