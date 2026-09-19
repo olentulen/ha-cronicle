@@ -11,6 +11,15 @@ _LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
+class CronicleEvent:
+    """Represents one Cronicle event."""
+
+    id: str
+    title: str
+    enabled: bool
+
+
+@dataclass
 class ActiveJob:
     """Represents a currently running Cronicle job."""
 
@@ -54,6 +63,7 @@ class CronicleData:
     """Single collected Cronicle data snapshot."""
 
     scheduler_enabled: bool = False
+    events: list[CronicleEvent] = field(default_factory=list)
     active_jobs: list[ActiveJob] = field(default_factory=list)
     total_events: int = 0
     enabled_events: int = 0
@@ -137,7 +147,10 @@ class CronicleClient:
 
         if isinstance(results[2], dict):
             rows = results[2].get("rows", []) or []
-            data.total_events = int(results[2].get("list", {}).get("length", len(rows)) or 0)
+            data.events = [_parse_event(event) for event in rows]
+            data.total_events = int(
+                results[2].get("list", {}).get("length", len(rows)) or 0
+            )
             data.enabled_events = sum(1 for event in rows if event.get("enabled"))
             data.disabled_events = max(data.total_events - data.enabled_events, 0)
         else:
@@ -146,7 +159,9 @@ class CronicleClient:
         if isinstance(results[3], dict):
             rows = results[3].get("rows", []) or []
             data.recent_jobs = [_parse_completed_job(row) for row in rows]
-            data.history_total = int(results[3].get("list", {}).get("length", len(rows)) or 0)
+            data.history_total = int(
+                results[3].get("list", {}).get("length", len(rows)) or 0
+            )
         else:
             _append_error(data, "get_history", results[3])
 
@@ -156,7 +171,9 @@ class CronicleClient:
         """Validate API connectivity."""
         await self._get("get_manager_state")
 
-    async def run_event(self, event_id: str | None = None, title: str | None = None) -> dict:
+    async def run_event(
+        self, event_id: str | None = None, title: str | None = None
+    ) -> dict:
         """Run an event immediately by ID or exact title."""
         payload = _id_or_title_payload(event_id, title)
         return await self._post("run_event", payload)
@@ -168,7 +185,9 @@ class CronicleClient:
     async def update_job(self, job_id: str, **kwargs) -> dict:
         """Update a running job."""
         payload = {"id": job_id}
-        payload.update({key: value for key, value in kwargs.items() if value is not None})
+        payload.update(
+            {key: value for key, value in kwargs.items() if value is not None}
+        )
         return await self._post("update_job", payload)
 
     async def set_scheduler_enabled(self, enabled: bool) -> dict:
@@ -203,6 +222,14 @@ def _id_or_title_payload(event_id: str | None, title: str | None) -> dict:
     if title:
         return {"title": title}
     raise CronicleAPIError("Either id or title is required")
+
+
+def _parse_event(raw: dict) -> CronicleEvent:
+    return CronicleEvent(
+        id=raw.get("id", ""),
+        title=raw.get("title", raw.get("id", "Unknown")),
+        enabled=bool(raw.get("enabled")),
+    )
 
 
 def _parse_active_job(raw: dict) -> ActiveJob:
