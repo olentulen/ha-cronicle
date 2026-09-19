@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -70,12 +70,48 @@ async def async_setup_entry(
         for description in BUTTON_DESCRIPTIONS
     ]
 
+    initial_events = {
+        event.id: event
+        for event in coordinator.data.events
+        if event.id
+    }
+
     entities.extend(
         CronicleEventButton(coordinator, entry, event)
-        for event in coordinator.data.events
+        for event in initial_events.values()
     )
 
     async_add_entities(entities)
+
+    known_event_ids = set(initial_events)
+
+    @callback
+    def _check_events() -> None:
+        """Add buttons for newly discovered Cronicle events."""
+        current_events = {
+            event.id: event
+            for event in coordinator.data.events
+            if event.id
+        }
+
+        new_event_ids = set(current_events) - known_event_ids
+
+        if not new_event_ids:
+            return
+
+        known_event_ids.update(new_event_ids)
+
+        async_add_entities(
+            CronicleEventButton(
+                coordinator,
+                entry,
+                current_events[event_id],
+            )
+            for event_id in new_event_ids
+        )
+
+    _check_events()
+    entry.async_on_unload(coordinator.async_add_listener(_check_events))
 
 
 class CronicleButton(CoordinatorEntity[CronicleCoordinator], ButtonEntity):
@@ -130,6 +166,27 @@ class CronicleEventButton(CoordinatorEntity[CronicleCoordinator], ButtonEntity):
         self._attr_unique_id = f"{entry.entry_id}_event_{event.id}"
         self._attr_device_info = _device_info(entry)
 
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Update the button when the Cronicle event changes."""
+        event = next(
+            (
+                event
+                for event in self.coordinator.data.events
+                if event.id == self._event_id
+            ),
+            None,
+        )
+
+        if event is None:
+            self._attr_available = False
+        else:
+            self._attr_available = True
+            self._attr_name = event.title
+
+        self.async_write_ha_state()
+
     async def async_press(self) -> None:
+        """Run the Cronicle event immediately."""
         await self.coordinator.client.run_event(event_id=self._event_id)
         await self.coordinator.async_request_refresh()
