@@ -126,7 +126,7 @@ class CronicleClient:
 
         if isinstance(results[0], dict):
             data.scheduler_enabled = bool(results[0].get("state", {}).get("enabled", 0))
-        else:
+        elif "Unsupported API" not in str(results[0]):
             _append_error(data, "get_master_state", results[0])
 
         if isinstance(results[1], dict):
@@ -154,7 +154,12 @@ class CronicleClient:
 
     async def test_connection(self) -> None:
         """Validate API connectivity."""
-        await self._get("get_master_state")
+        try:
+            await self._get("get_master_state")
+        except CronicleAPIError as err:
+            if "Unsupported API" not in str(err):
+                raise
+            await self._post("get_schedule", {"offset": 0, "limit": 1})
 
     async def run_event(self, event_id: str | None = None, title: str | None = None) -> dict:
         """Run an event immediately by ID or exact title."""
