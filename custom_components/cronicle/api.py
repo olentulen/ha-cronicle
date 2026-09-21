@@ -17,6 +17,7 @@ class CronicleEvent:
     id: str
     title: str
     enabled: bool
+    script_name: str | None = None
 
 
 @dataclass
@@ -91,24 +92,39 @@ class CronicleClient:
     ) -> None:
         scheme = "https" if use_ssl else "http"
         self._base = f"{scheme}://{host}:{port}/api/app"
-        self._headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+        self._headers = {
+            "X-API-Key": api_key,
+            "Content-Type": "application/json",
+        }
         self._session = session
         self._history_limit = max(1, history_limit)
 
     async def _get(self, endpoint: str) -> dict:
         url = f"{self._base}/{endpoint}/v1"
+
         try:
             async with self._session.get(
-                url, headers=self._headers, timeout=aiohttp.ClientTimeout(total=10)
+                url,
+                headers=self._headers,
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as response:
                 response.raise_for_status()
                 data = await response.json()
+
         except aiohttp.ClientError as err:
-            raise CronicleAPIError(f"HTTP error on {endpoint}: {err}") from err
+            raise CronicleAPIError(
+                f"HTTP error on {endpoint}: {err}"
+            ) from err
+
         return _validate_response(endpoint, data)
 
-    async def _post(self, endpoint: str, payload: dict | None = None) -> dict:
+    async def _post(
+        self,
+        endpoint: str,
+        payload: dict | None = None,
+    ) -> dict:
         url = f"{self._base}/{endpoint}/v1"
+
         try:
             async with self._session.post(
                 url,
@@ -118,162 +134,369 @@ class CronicleClient:
             ) as response:
                 response.raise_for_status()
                 data = await response.json()
+
         except aiohttp.ClientError as err:
-            raise CronicleAPIError(f"HTTP error on {endpoint}: {err}") from err
+            raise CronicleAPIError(
+                f"HTTP error on {endpoint}: {err}"
+            ) from err
+
         return _validate_response(endpoint, data)
 
     async def fetch_all(self) -> CronicleData:
         """Fetch the Cronicle state used by entities."""
+
         results = await asyncio.gather(
             self._get("get_manager_state"),
             self._get("get_active_jobs"),
-            self._post("get_schedule", {"offset": 0, "limit": 1000}),
-            self._post("get_history", {"offset": 0, "limit": self._history_limit}),
+            self._post(
+                "get_schedule",
+                {
+                    "offset": 0,
+                    "limit": 1000,
+                },
+            ),
+            self._post(
+                "get_history",
+                {
+                    "offset": 0,
+                    "limit": self._history_limit,
+                },
+            ),
             return_exceptions=True,
         )
 
         data = CronicleData()
 
         if isinstance(results[0], dict):
-            data.scheduler_enabled = bool(results[0].get("state", {}).get("enabled", 0))
+            data.scheduler_enabled = bool(
+                results[0].get("state", {}).get("enabled", 0)
+            )
         else:
-            _append_error(data, "get_manager_state", results[0])
+            _append_error(
+                data,
+                "get_manager_state",
+                results[0],
+            )
 
         if isinstance(results[1], dict):
             jobs_raw = results[1].get("jobs", {}) or {}
-            data.active_jobs = [_parse_active_job(job) for job in jobs_raw.values()]
+
+            data.active_jobs = [
+                _parse_active_job(job)
+                for job in jobs_raw.values()
+            ]
         else:
-            _append_error(data, "get_active_jobs", results[1])
+            _append_error(
+                data,
+                "get_active_jobs",
+                results[1],
+            )
 
         if isinstance(results[2], dict):
             rows = results[2].get("rows", []) or []
-            data.events = [_parse_event(event) for event in rows]
+
+            data.events = [
+                _parse_event(event)
+                for event in rows
+            ]
+
             data.total_events = int(
-                results[2].get("list", {}).get("length", len(rows)) or 0
+                results[2]
+                .get("list", {})
+                .get("length", len(rows))
+                or 0
             )
-            data.enabled_events = sum(1 for event in rows if event.get("enabled"))
-            data.disabled_events = max(data.total_events - data.enabled_events, 0)
+
+            data.enabled_events = sum(
+                1
+                for event in rows
+                if event.get("enabled")
+            )
+
+            data.disabled_events = max(
+                data.total_events - data.enabled_events,
+                0,
+            )
+
         else:
-            _append_error(data, "get_schedule", results[2])
+            _append_error(
+                data,
+                "get_schedule",
+                results[2],
+            )
 
         if isinstance(results[3], dict):
             rows = results[3].get("rows", []) or []
-            data.recent_jobs = [_parse_completed_job(row) for row in rows]
+
+            data.recent_jobs = [
+                _parse_completed_job(row)
+                for row in rows
+            ]
+
             data.history_total = int(
-                results[3].get("list", {}).get("length", len(rows)) or 0
+                results[3]
+                .get("list", {})
+                .get("length", len(rows))
+                or 0
             )
+
         else:
-            _append_error(data, "get_history", results[3])
+            _append_error(
+                data,
+                "get_history",
+                results[3],
+            )
 
         return data
 
     async def test_connection(self) -> None:
         """Validate API connectivity."""
+
         await self._get("get_manager_state")
 
     async def run_event(
-        self, event_id: str | None = None, title: str | None = None
+        self,
+        event_id: str | None = None,
+        title: str | None = None,
     ) -> dict:
         """Run an event immediately by ID or exact title."""
-        payload = _id_or_title_payload(event_id, title)
-        return await self._post("run_event", payload)
 
-    async def abort_job(self, job_id: str) -> dict:
-        """Abort a running job."""
-        return await self._post("abort_job", {"id": job_id})
-
-    async def update_job(self, job_id: str, **kwargs) -> dict:
-        """Update a running job."""
-        payload = {"id": job_id}
-        payload.update(
-            {key: value for key, value in kwargs.items() if value is not None}
+        payload = _id_or_title_payload(
+            event_id,
+            title,
         )
-        return await self._post("update_job", payload)
 
-    async def set_scheduler_enabled(self, enabled: bool) -> dict:
+        return await self._post(
+            "run_event",
+            payload,
+        )
+
+    async def abort_job(
+        self,
+        job_id: str,
+    ) -> dict:
+        """Abort a running job."""
+
+        return await self._post(
+            "abort_job",
+            {
+                "id": job_id,
+            },
+        )
+
+    async def update_job(
+        self,
+        job_id: str,
+        **kwargs,
+    ) -> dict:
+        """Update a running job."""
+
+        payload = {
+            "id": job_id,
+        }
+
+        payload.update(
+            {
+                key: value
+                for key, value in kwargs.items()
+                if value is not None
+            }
+        )
+
+        return await self._post(
+            "update_job",
+            payload,
+        )
+
+    async def set_scheduler_enabled(
+        self,
+        enabled: bool,
+    ) -> dict:
         """Enable or disable the Cronicle scheduler."""
+
         return await self._post(
             "update_manager_state",
-            {"enabled": 1 if enabled else 0},
+            {
+                "enabled": 1 if enabled else 0,
+            },
         )
 
-    async def get_job_status(self, job_id: str) -> dict:
+    async def get_job_status(
+        self,
+        job_id: str,
+    ) -> dict:
         """Fetch status for one job."""
-        return await self._post("get_job_status", {"id": job_id})
+
+        return await self._post(
+            "get_job_status",
+            {
+                "id": job_id,
+            },
+        )
 
 
-def _validate_response(endpoint: str, data: dict) -> dict:
+def _validate_response(
+    endpoint: str,
+    data: dict,
+) -> dict:
     if data.get("code") != 0:
         raise CronicleAPIError(
-            f"Cronicle returned code={data.get('code')} on {endpoint}: {data.get('description')}"
+            f"Cronicle returned code={data.get('code')} "
+            f"on {endpoint}: {data.get('description')}"
         )
+
     return data
 
 
-def _append_error(data: CronicleData, endpoint: str, err) -> None:
+def _append_error(
+    data: CronicleData,
+    endpoint: str,
+    err,
+) -> None:
     message = f"{endpoint}: {err}"
+
     data.errors.append(message)
-    _LOGGER.warning("Cronicle API call failed: %s", message)
 
-
-def _id_or_title_payload(event_id: str | None, title: str | None) -> dict:
-    if event_id:
-        return {"id": event_id}
-    if title:
-        return {"title": title}
-    raise CronicleAPIError("Either id or title is required")
-
-
-def _parse_event(raw: dict) -> CronicleEvent:
-    return CronicleEvent(
-        id=raw.get("id", ""),
-        title=raw.get("title", raw.get("id", "Unknown")),
-        enabled=bool(raw.get("enabled")),
+    _LOGGER.warning(
+        "Cronicle API call failed: %s",
+        message,
     )
 
 
-def _parse_active_job(raw: dict) -> ActiveJob:
+def _id_or_title_payload(
+    event_id: str | None,
+    title: str | None,
+) -> dict:
+    if event_id:
+        return {
+            "id": event_id,
+        }
+
+    if title:
+        return {
+            "title": title,
+        }
+
+    raise CronicleAPIError(
+        "Either id or title is required"
+    )
+
+
+def _parse_event(
+    raw: dict,
+) -> CronicleEvent:
+    """Parse a Cronicle event."""
+
+    notes = raw.get("notes", "") or ""
+    script_name = None
+
+    if notes.startswith("Managed by Git: "):
+        script_name = notes[
+            len("Managed by Git: "):
+        ].strip() or None
+
+    return CronicleEvent(
+        id=raw.get("id", ""),
+        title=raw.get(
+            "title",
+            raw.get("id", "Unknown"),
+        ),
+        enabled=bool(
+            raw.get("enabled")
+        ),
+        script_name=script_name,
+    )
+
+
+def _parse_active_job(
+    raw: dict,
+) -> ActiveJob:
     cpu_obj = raw.get("cpu") or {}
     mem_obj = raw.get("mem") or {}
+
     return ActiveJob(
         id=raw.get("id", ""),
         event=raw.get("event", ""),
-        title=raw.get("event_title", raw.get("id", "Unknown")),
+        title=raw.get(
+            "event_title",
+            raw.get("id", "Unknown"),
+        ),
         source=raw.get("source", ""),
-        elapsed=_to_float(raw.get("elapsed")),
-        progress=_to_float(raw.get("progress")),
+        elapsed=_to_float(
+            raw.get("elapsed")
+        ),
+        progress=_to_float(
+            raw.get("progress")
+        ),
         hostname=raw.get("hostname", ""),
-        nice_target=raw.get("nice_target") or raw.get("target", ""),
-        category=raw.get("category_title") or raw.get("category", ""),
-        plugin=raw.get("plugin_title") or raw.get("plugin", ""),
-        time_start=_to_float(raw.get("time_start")),
-        timeout=int(raw.get("timeout") or 0),
+        nice_target=(
+            raw.get("nice_target")
+            or raw.get("target", "")
+        ),
+        category=(
+            raw.get("category_title")
+            or raw.get("category", "")
+        ),
+        plugin=(
+            raw.get("plugin_title")
+            or raw.get("plugin", "")
+        ),
+        time_start=_to_float(
+            raw.get("time_start")
+        ),
+        timeout=int(
+            raw.get("timeout") or 0
+        ),
         pid=raw.get("pid"),
-        cpu_current=_to_float(cpu_obj.get("current")),
-        mem_current=int(mem_obj.get("current") or 0),
+        cpu_current=_to_float(
+            cpu_obj.get("current")
+        ),
+        mem_current=int(
+            mem_obj.get("current") or 0
+        ),
     )
 
 
-def _parse_completed_job(raw: dict) -> CompletedJob:
+def _parse_completed_job(
+    raw: dict,
+) -> CompletedJob:
     return CompletedJob(
         id=raw.get("id", ""),
         event=raw.get("event", ""),
-        title=raw.get("event_title", raw.get("title", "Unknown")),
-        code=int(raw.get("code") or 0),
-        elapsed=_to_float(raw.get("elapsed")),
+        title=raw.get(
+            "event_title",
+            raw.get("title", "Unknown"),
+        ),
+        code=int(
+            raw.get("code") or 0
+        ),
+        elapsed=_to_float(
+            raw.get("elapsed")
+        ),
         hostname=raw.get("hostname", ""),
-        category=raw.get("category_title") or raw.get("category", ""),
-        plugin=raw.get("plugin_title") or raw.get("plugin", ""),
+        category=(
+            raw.get("category_title")
+            or raw.get("category", "")
+        ),
+        plugin=(
+            raw.get("plugin_title")
+            or raw.get("plugin", "")
+        ),
         source=raw.get("source", ""),
         description=raw.get("description", ""),
-        time_start=_to_float(raw.get("time_start")),
-        time_end=_to_float(raw.get("time_end")),
+        time_start=_to_float(
+            raw.get("time_start")
+        ),
+        time_end=_to_float(
+            raw.get("time_end")
+        ),
     )
 
 
 def _to_float(value) -> float:
     if value is None or value == "":
         return 0.0
+
     try:
         return float(value)
     except (TypeError, ValueError):

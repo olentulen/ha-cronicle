@@ -49,13 +49,41 @@ BUTTON_DESCRIPTIONS: tuple[CronicleButtonDescription, ...] = (
 
 def _device_info(entry: ConfigEntry) -> dict:
     scheme = "https" if entry.data.get(CONF_USE_SSL) else "http"
+
     return {
         "identifiers": {(DOMAIN, entry.entry_id)},
         "name": "Cronicle",
         "manufacturer": "Cronicle",
         "model": "Job Scheduler",
-        "configuration_url": f"{scheme}://{entry.data[CONF_HOST]}:{entry.data[CONF_PORT]}",
+        "configuration_url": (
+            f"{scheme}://{entry.data[CONF_HOST]}:{entry.data[CONF_PORT]}"
+        ),
     }
+
+
+def _event_key(event: CronicleEvent) -> str:
+    """Return the stable identity key for an event.
+
+    Git-managed events are identified by their script name.
+    Manual Cronicle events are identified by their Cronicle event ID.
+    """
+
+    if event.script_name:
+        return f"script:{event.script_name}"
+
+    return f"id:{event.id}"
+
+
+def _event_unique_id(
+    entry: ConfigEntry,
+    event: CronicleEvent,
+) -> str:
+    """Build a stable Home Assistant unique ID for an event."""
+
+    if event.script_name:
+        return f"{entry.entry_id}_event_{event.script_name}"
+
+    return f"{entry.entry_id}_event_{event.id}"
 
 
 async def async_setup_entry(
@@ -65,56 +93,91 @@ async def async_setup_entry(
 ) -> None:
     coordinator: CronicleCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities: list[CronicleButton] = [
+    entities: list[ButtonEntity] = [
         CronicleButton(coordinator, entry, description)
         for description in BUTTON_DESCRIPTIONS
     ]
 
-    initial_events = {
-        event.id: event
-        for event in coordinator.data.events
-        if event.id
-    }
+    event_entities: dict[str, CronicleEventButton] = {}
 
-    entities.extend(
-        CronicleEventButton(coordinator, entry, event)
-        for event in initial_events.values()
-    )
+    for event in coordinator.data.events:
+        if not event.id:
+            continue
+
+        key = _event_key(event)
+
+        if key in event_entities:
+            continue
+
+        event_entities[key] = CronicleEventButton(
+            coordinator,
+            entry,
+            event,
+        )
+
+    entities.extend(event_entities.values())
 
     async_add_entities(entities)
 
-    known_event_ids = set(initial_events)
-
     @callback
     def _check_events() -> None:
-        """Add buttons for newly discovered Cronicle events."""
-        current_events = {
-            event.id: event
-            for event in coordinator.data.events
-            if event.id
-        }
+        """Update existing event buttons and add newly discovered events."""
 
-        new_event_ids = set(current_events) - known_event_ids
+        current_events: dict[str, CronicleEvent] = {}
 
-        if not new_event_ids:
-            return
+        for event in coordinator.data.events:
+            if not event.id:
+                continue
 
-        known_event_ids.update(new_event_ids)
+            key = _event_key(event)
 
-        async_add_entities(
-            CronicleEventButton(
+            # Avoid duplicate entities if Cronicle somehow returns
+            # duplicate events with the same logical identity.
+            if key in current_events:
+                continue
+
+            current_events[key] = event
+
+        # Update existing entities.
+        for key, entity in event_entities.items():
+            event = current_events.get(key)
+
+            if event is None:
+                entity._event_id = None
+                entity._attr_available = False
+            else:
+                entity._event_id = event.id
+                entity._attr_available = True
+                entity._attr_name = event.title
+                entity._attr_icon = "mdi:play-circle"
+
+            entity.async_write_ha_state()
+
+        # Add newly discovered events.
+        for key, event in current_events.items():
+            if key in event_entities:
+                continue
+
+            entity = CronicleEventButton(
                 coordinator,
                 entry,
-                current_events[event_id],
+                event,
             )
-            for event_id in new_event_ids
-        )
+
+            event_entities[key] = entity
+            async_add_entities([entity])
 
     _check_events()
-    entry.async_on_unload(coordinator.async_add_listener(_check_events))
+
+    entry.async_on_unload(
+        coordinator.async_add_listener(_check_events)
+    )
 
 
-class CronicleButton(CoordinatorEntity[CronicleCoordinator], ButtonEntity):
+class CronicleButton(
+    CoordinatorEntity[CronicleCoordinator],
+    ButtonEntity,
+):
     """Cronicle control button."""
 
     entity_description: CronicleButtonDescription
@@ -127,6 +190,7 @@ class CronicleButton(CoordinatorEntity[CronicleCoordinator], ButtonEntity):
         description: CronicleButtonDescription,
     ) -> None:
         super().__init__(coordinator)
+
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_device_info = _device_info(entry)
@@ -148,7 +212,10 @@ class CronicleButton(CoordinatorEntity[CronicleCoordinator], ButtonEntity):
             await self.coordinator.async_request_refresh()
 
 
-class CronicleEventButton(CoordinatorEntity[CronicleCoordinator], ButtonEntity):
+class CronicleEventButton(
+    CoordinatorEntity[CronicleCoordinator],
+    ButtonEntity,
+):
     """Button for running a Cronicle event."""
 
     _attr_has_entity_name = True
@@ -160,27 +227,33 @@ class CronicleEventButton(CoordinatorEntity[CronicleCoordinator], ButtonEntity):
         event: CronicleEvent,
     ) -> None:
         super().__init__(coordinator)
-        self._event_id = event.id
+
+        self._event_id: str | None = event.id
+        self._event_key = _event_key(event)
+
         self._attr_name = event.title
         self._attr_icon = "mdi:play-circle"
-        self._attr_unique_id = f"{entry.entry_id}_event_{event.id}"
+        self._attr_unique_id = _event_unique_id(entry, event)
         self._attr_device_info = _device_info(entry)
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Update the button when the Cronicle event changes."""
+        """Update the button when Cronicle changes."""
+
         event = next(
             (
                 event
                 for event in self.coordinator.data.events
-                if event.id == self._event_id
+                if _event_key(event) == self._event_key
             ),
             None,
         )
 
         if event is None:
+            self._event_id = None
             self._attr_available = False
         else:
+            self._event_id = event.id
             self._attr_available = True
             self._attr_name = event.title
 
@@ -188,5 +261,12 @@ class CronicleEventButton(CoordinatorEntity[CronicleCoordinator], ButtonEntity):
 
     async def async_press(self) -> None:
         """Run the Cronicle event immediately."""
-        await self.coordinator.client.run_event(event_id=self._event_id)
+
+        if self._event_id is None:
+            return
+
+        await self.coordinator.client.run_event(
+            event_id=self._event_id
+        )
+
         await self.coordinator.async_request_refresh()
